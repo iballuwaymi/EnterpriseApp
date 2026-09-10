@@ -7,7 +7,6 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ====== إعدادات الاتصال بأودو ======
-// عدّل اسم قاعدة البيانات (db) حسب إعداد شركتكم الفعلي في أودو
 const String odooBaseUrl =
     'https://varietyit-al-muhaidib-sanitary-ceramics.odoo.com';
 const String odooDb = 'varietyit-al-muhaidib-sanitary-ceramics';
@@ -39,50 +38,70 @@ class OdooService {
   static String? sessionId;
   static int? uid;
 
-  /// تسجيل الدخول عبر JSON-RPC (Odoo standard endpoint)
+  /// تسجيل الدخول عبر Odoo JSON-RPC
   static Future<Map<String, dynamic>> login(
       String employeeId, String password) async {
-    final url = Uri.parse('$odooBaseUrl/web/session/authenticate');
-    final body = jsonEncode({
-      "jsonrpc": "2.0",
-      "method": "call",
-      "params": {
-        "db": odooDb,
-        "login": employeeId,
-        "password": password,
-      }
-    });
+    try {
+      final url = Uri.parse('$odooBaseUrl/web/session/authenticate');
 
-    final response = await http.post(
-      url,
-      headers: {"Content-Type": "application/json"},
-      body: body,
-    );
+      final body = jsonEncode({
+        "jsonrpc": "2.0",
+        "method": "call",
+        "params": {
+          "db": odooDb,
+          "login": employeeId,
+          "password": password,
+        }
+      });
 
-    final data = jsonDecode(response.body);
-    if (data['result'] != null && data['result']['uid'] != null) {
-      uid = data['result']['uid'];
-      // استخراج session_id من الكوكيز
-      final rawCookie = response.headers['set-cookie'];
-      if (rawCookie != null) {
-        final match = RegExp(r'session_id=([^;]+)').firstMatch(rawCookie);
-        sessionId = match?.group(1);
+      final response = await http.post(
+        url,
+        headers: {"Content-Type": "application/json"},
+        body: body,
+      );
+
+      final data = jsonDecode(response.body);
+
+      if (data['result'] != null && data['result']['uid'] != null) {
+        uid = data['result']['uid'];
+
+        final rawCookie = response.headers['set-cookie'];
+
+        if (rawCookie != null) {
+          final match =
+              RegExp(r'session_id=([^;]+)').firstMatch(rawCookie);
+
+          sessionId = match?.group(1);
+        }
+
+        final prefs = await SharedPreferences.getInstance();
+
+        await prefs.setString('employee_id', employeeId);
+
+        if (sessionId != null) {
+          await prefs.setString('session_id', sessionId!);
+        }
+
+        return {
+          "success": true,
+          "uid": uid,
+        };
       }
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('employee_id', employeeId);
-      if (sessionId != null) {
-        await prefs.setString('session_id', sessionId!);
-      }
-      return {"success": true, "uid": uid};
-    } else {
+
       return {
         "success": false,
-        "error": data['error']?['data']?['message'] ?? "بيانات الدخول غير صحيحة"
+        "error": data['error']?['data']?['message'] ??
+            "بيانات الدخول غير صحيحة",
+      };
+    } catch (e) {
+      return {
+        "success": false,
+        "error": "تعذر الاتصال بأودو: $e",
       };
     }
   }
 
-  /// استدعاء عام لأي موديل في أودو (call_kw)
+  /// استدعاء عام لأي موديل في أودو
   static Future<dynamic> callKw({
     required String model,
     required String method,
@@ -90,6 +109,7 @@ class OdooService {
     Map<String, dynamic> kwargs = const {},
   }) async {
     final url = Uri.parse('$odooBaseUrl/web/dataset/call_kw');
+
     final body = jsonEncode({
       "jsonrpc": "2.0",
       "method": "call",
@@ -111,27 +131,129 @@ class OdooService {
     );
 
     final data = jsonDecode(response.body);
+
     if (data['error'] != null) {
-      throw Exception(data['error']['data']?['message'] ?? 'خطأ في الاتصال');
+      throw Exception(
+        data['error']['data']?['message'] ??
+            data['error']['message'] ??
+            'خطأ في الاتصال بأودو',
+      );
     }
+
     return data['result'];
   }
 
-  /// تسجيل حضور/انصراف عبر موديل hr.attendance
-  static Future<bool> checkInOut(double lat, double lng) async {
+  /// الحصول على الموظف المرتبط بحساب Odoo الحالي
+  static Future<Map<String, dynamic>?> getCurrentEmployee() async {
+    if (uid == null) {
+      throw Exception('لم يتم العثور على حساب المستخدم');
+    }
+
+    final result = await callKw(
+      model: 'hr.employee',
+      method: 'search_read',
+      args: [
+        [
+          ['user_id', '=', uid]
+        ]
+      ],
+      kwargs: {
+        'fields': ['id', 'name'],
+        'limit': 1,
+      },
+    );
+
+    if (result is List && result.isNotEmpty) {
+      return Map<String, dynamic>.from(result.first);
+    }
+
+    return null;
+  }
+
+  /// تسجيل حضور أو انصراف
+  static Future<Map<String, dynamic>> checkInOut(
+      double lat, double lng) async {
     try {
+      final employee = await getCurrentEmployee();
+
+      if (employee == null) {
+        return {
+          'success': false,
+          'message': 'لم يتم العثور على الموظف المرتبط بهذا الحساب في أودو',
+        };
+      }
+
+      final employeeId = employee['id'];
+      final employeeName = employee['name'] ?? '';
+
+      // البحث عن آخر حضور مفتوح
+      final openAttendance = await callKw(
+        model: 'hr.attendance',
+        method: 'search_read',
+        args: [
+          [
+            ['employee_id', '=', employeeId],
+            ['check_out', '=', false],
+          ]
+        ],
+        kwargs: {
+          'fields': ['id', 'check_in'],
+          'limit': 1,
+          'order': 'check_in desc',
+        },
+      );
+
+      final now = DateTime.now().toUtc().toIso8601String();
+
+      // إذا كان هناك حضور مفتوح -> تسجيل انصراف
+      if (openAttendance is List && openAttendance.isNotEmpty) {
+        final attendance =
+            Map<String, dynamic>.from(openAttendance.first);
+
+        final attendanceId = attendance['id'];
+
+        await callKw(
+          model: 'hr.attendance',
+          method: 'write',
+          args: [
+            [attendanceId],
+            {
+              'check_out': now,
+            }
+          ],
+        );
+
+        return {
+          'success': true,
+          'action': 'check_out',
+          'employee_name': employeeName,
+          'message': 'تم تسجيل الانصراف بنجاح',
+        };
+      }
+
+      // لا يوجد حضور مفتوح -> تسجيل حضور جديد
       await callKw(
         model: 'hr.attendance',
         method: 'create',
         args: [
           {
-            'check_in': DateTime.now().toUtc().toIso8601String(),
+            'employee_id': employeeId,
+            'check_in': now,
           }
         ],
       );
-      return true;
+
+      return {
+        'success': true,
+        'action': 'check_in',
+        'employee_name': employeeName,
+        'message': 'تم تسجيل الحضور بنجاح',
+      };
     } catch (e) {
-      return false;
+      return {
+        'success': false,
+        'message': 'فشل تسجيل الحضور/الانصراف: $e',
+      };
     }
   }
 }
@@ -147,28 +269,52 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   final _idController = TextEditingController();
   final _passController = TextEditingController();
+
   bool _loading = false;
   String? _error;
 
   Future<void> _login() async {
+    if (_idController.text.trim().isEmpty ||
+        _passController.text.isEmpty) {
+      setState(() {
+        _error = 'أدخل الرقم الوظيفي وكلمة المرور';
+      });
+      return;
+    }
+
     setState(() {
       _loading = true;
       _error = null;
     });
 
-    final result =
-        await OdooService.login(_idController.text.trim(), _passController.text);
+    final result = await OdooService.login(
+      _idController.text.trim(),
+      _passController.text,
+    );
+
+    if (!mounted) return;
 
     setState(() => _loading = false);
 
     if (result['success'] == true) {
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => const HomeScreen()),
+        MaterialPageRoute(
+          builder: (_) => const HomeScreen(),
+        ),
       );
     } else {
-      setState(() => _error = result['error']);
+      setState(() {
+        _error = result['error'];
+      });
     }
+  }
+
+  @override
+  void dispose() {
+    _idController.dispose();
+    _passController.dispose();
+    super.dispose();
   }
 
   @override
@@ -181,10 +327,19 @@ class _LoginScreenState extends State<LoginScreen> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Icon(Icons.business, size: 80, color: Colors.blue),
+                const Icon(
+                  Icons.business,
+                  size: 80,
+                  color: Colors.blue,
+                ),
                 const SizedBox(height: 16),
-                const Text('شركة المهيدب',
-                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+                const Text(
+                  'شركة المهيدب',
+                  style: TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
                 const SizedBox(height: 32),
                 TextField(
                   controller: _idController,
@@ -208,15 +363,23 @@ class _LoginScreenState extends State<LoginScreen> {
                 if (_error != null)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 12),
-                    child: Text(_error!, style: const TextStyle(color: Colors.red)),
+                    child: Text(
+                      _error!,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.red),
+                    ),
                   ),
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(
                     onPressed: _loading ? null : _login,
-                    style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(16)),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.all(16),
+                    ),
                     child: _loading
-                        ? const CircularProgressIndicator(color: Colors.white)
+                        ? const CircularProgressIndicator(
+                            color: Colors.white,
+                          )
                         : const Text('تسجيل الدخول'),
                   ),
                 ),
@@ -240,21 +403,32 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int _index = 0;
 
-  final _screens = const [AttendanceScreen(), BarcodeScreen()];
+  final _screens = const [
+    AttendanceScreen(),
+    BarcodeScreen(),
+  ];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('تطبيق المهيدب')),
+      appBar: AppBar(
+        title: const Text('تطبيق المهيدب'),
+      ),
       body: _screens[_index],
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _index,
-        onTap: (i) => setState(() => _index = i),
+        onTap: (i) {
+          setState(() => _index = i);
+        },
         items: const [
           BottomNavigationBarItem(
-              icon: Icon(Icons.fingerprint), label: 'الحضور والانصراف'),
+            icon: Icon(Icons.fingerprint),
+            label: 'الحضور والانصراف',
+          ),
           BottomNavigationBarItem(
-              icon: Icon(Icons.qr_code_scanner), label: 'فحص باركود'),
+            icon: Icon(Icons.qr_code_scanner),
+            label: 'فحص باركود',
+          ),
         ],
       ),
     );
@@ -271,21 +445,31 @@ class AttendanceScreen extends StatefulWidget {
 
 class _AttendanceScreenState extends State<AttendanceScreen> {
   final LocalAuthentication _auth = LocalAuthentication();
-  String _status = 'جاهز لتسجيل الحضور';
+
+  String _status = 'جاهز لتسجيل الحضور أو الانصراف';
   bool _loading = false;
 
   Future<Position?> _getLocation() async {
-    LocationPermission permission = await Geolocator.checkPermission();
+    LocationPermission permission =
+        await Geolocator.checkPermission();
+
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
     }
+
     if (permission == LocationPermission.denied ||
         permission == LocationPermission.deniedForever) {
-      setState(() => _status = 'تم رفض إذن الموقع');
+      if (mounted) {
+        setState(() {
+          _status = 'تم رفض إذن الموقع';
+        });
+      }
       return null;
     }
+
     return await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high);
+      desiredAccuracy: LocationAccuracy.high,
+    );
   }
 
   Future<void> _markAttendance() async {
@@ -296,38 +480,81 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
     try {
       final canCheck = await _auth.canCheckBiometrics;
+
       if (!canCheck) {
-        setState(() => _status = 'الجهاز لا يدعم بصمة الإصبع');
+        setState(() {
+          _status = 'الجهاز لا يدعم التحقق بالبصمة أو Face ID';
+        });
         return;
       }
 
       final authenticated = await _auth.authenticate(
-        localizedReason: 'تحقق من هويتك لتسجيل الحضور',
-        options: const AuthenticationOptions(biometricOnly: true),
+        localizedReason: 'تحقق من هويتك لتسجيل الحضور أو الانصراف',
+        options: const AuthenticationOptions(
+          biometricOnly: true,
+        ),
       );
 
       if (!authenticated) {
-        setState(() => _status = 'فشل التحقق من البصمة');
+        setState(() {
+          _status = 'فشل التحقق من البصمة';
+        });
         return;
       }
 
-      setState(() => _status = 'جاري تحديد الموقع...');
+      setState(() {
+        _status = 'جاري تحديد الموقع...';
+      });
+
       final position = await _getLocation();
+
       if (position == null) return;
 
-      setState(() => _status = 'جاري إرسال البيانات إلى أودو...');
-      final success =
-          await OdooService.checkInOut(position.latitude, position.longitude);
+      setState(() {
+        _status = 'جاري إرسال البيانات إلى أودو...';
+      });
+
+      final result = await OdooService.checkInOut(
+        position.latitude,
+        position.longitude,
+      );
+
+      if (!mounted) return;
+
+      final success = result['success'] == true;
+      final action = result['action'];
 
       setState(() {
-        _status = success
-            ? 'تم تسجيل الحضور بنجاح ✅\n(${position.latitude.toStringAsFixed(5)}, ${position.longitude.toStringAsFixed(5)})'
-            : 'فشل إرسال البيانات لأودو';
+        if (success && action == 'check_in') {
+          _status =
+              'تم تسجيل الحضور بنجاح ✅\n'
+              '${result['employee_name'] ?? ''}\n\n'
+              'الموقع:\n'
+              '${position.latitude.toStringAsFixed(5)}, '
+              '${position.longitude.toStringAsFixed(5)}';
+        } else if (success && action == 'check_out') {
+          _status =
+              'تم تسجيل الانصراف بنجاح ✅\n'
+              '${result['employee_name'] ?? ''}\n\n'
+              'الموقع:\n'
+              '${position.latitude.toStringAsFixed(5)}, '
+              '${position.longitude.toStringAsFixed(5)}';
+        } else {
+          _status = result['message'] ?? 'حدث خطأ غير معروف';
+        }
       });
     } catch (e) {
-      setState(() => _status = 'خطأ: $e');
+      if (mounted) {
+        setState(() {
+          _status = 'خطأ: $e';
+        });
+      }
     } finally {
-      setState(() => _loading = false);
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
     }
   }
 
@@ -339,9 +566,17 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.fingerprint, size: 100, color: Colors.blue),
+            const Icon(
+              Icons.fingerprint,
+              size: 100,
+              color: Colors.blue,
+            ),
             const SizedBox(height: 24),
-            Text(_status, textAlign: TextAlign.center, style: const TextStyle(fontSize: 16)),
+            Text(
+              _status,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 16),
+            ),
             const SizedBox(height: 32),
             if (_loading)
               const CircularProgressIndicator()
@@ -349,8 +584,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
               ElevatedButton.icon(
                 onPressed: _markAttendance,
                 icon: const Icon(Icons.check),
-                label: const Text('تسجيل حضور/انصراف'),
-                style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(16)),
+                label: const Text('تسجيل حضور / انصراف'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.all(16),
+                ),
               ),
           ],
         ),
@@ -369,7 +606,9 @@ class BarcodeScreen extends StatefulWidget {
 
 class _BarcodeScreenState extends State<BarcodeScreen> {
   String? _lastCode;
-  final MobileScannerController _controller = MobileScannerController();
+
+  final MobileScannerController _controller =
+      MobileScannerController();
 
   @override
   void dispose() {
@@ -378,10 +617,15 @@ class _BarcodeScreenState extends State<BarcodeScreen> {
   }
 
   void _onDetect(BarcodeCapture capture) {
+    if (capture.barcodes.isEmpty) return;
+
     final barcode = capture.barcodes.first;
     final value = barcode.rawValue;
+
     if (value != null && value != _lastCode) {
-      setState(() => _lastCode = value);
+      setState(() {
+        _lastCode = value;
+      });
     }
   }
 
@@ -403,7 +647,10 @@ class _BarcodeScreenState extends State<BarcodeScreen> {
               _lastCode == null
                   ? 'وجّه الكاميرا نحو الباركود'
                   : 'الباركود: $_lastCode',
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
             ),
           ),
         ),
