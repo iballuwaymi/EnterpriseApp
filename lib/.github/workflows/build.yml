@@ -18,45 +18,6 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Build iOS (unsigned)
-        run: |
-          flutter build ios --release --no-codesign
-
-      - name: Create IPA package
-        run: |
-          mkdir -p build/ios/iphoneos/Payload
-          cp -r build/ios/iphoneos/Runner.app build/ios/iphoneos/Payload/
-          cd build/ios/iphoneos
-          zip -r app-unsigned.ipa Payload
-
-      - name: Upload IPA artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: iOS-IPA
-          path: build/ios/iphoneos/app-unsigned.ipa
-name: Build iOS IPA
-
-on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
-
-jobs:
-  build-ios:
-    runs-on: macos-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.24.0'
-          channel: 'stable'
-
       - name: Generate iOS project files
         run: flutter create --platforms=ios --org com.almuhaidib .
 
@@ -65,24 +26,4 @@ jobs:
           PLIST=ios/Runner/Info.plist
           /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'التطبيق يحتاج الكاميرا لفحص الباركود'" $PLIST
           /usr/libexec/PlistBuddy -c "Add :NSLocationWhenInUseUsageDescription string 'التطبيق يحتاج الموقع لتسجيل الحضور والانصراف'" $PLIST
-          /usr/libexec/PlistBuddy -c "Add :NSLocationAlwaysAndWhenInUseUsageDescription string 'التطبيق يحتاج الموقع لتسجيل الحضور والانصراف'" $PLIST
-          /usr/libexec/PlistBuddy -c "Add :NSFaceIDUsageDescription string 'التطبيق يستخدم Face ID للتحقق من هويتك عند تسجيل الحضور'" $PLIST
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Build iOS (unsigned)
-        run: flutter build ios --release --no-codesign
-
-      - name: Create IPA package
-        run: |
-          mkdir -p build/ios/iphoneos/Payload
-          cp -r build/ios/iphoneos/Runner.app build/ios/iphoneos/Payload/
-          cd build/ios/iphoneos
-          zip -r app-unsigned.ipa Payload
-
-      - name: Upload IPA artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: iOS-IPA
-          path: build/ios/iphoneos/app-unsigned.ipa
+          /usr/libexec/PlistBuddy -c
