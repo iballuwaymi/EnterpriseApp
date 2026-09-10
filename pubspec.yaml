@@ -1,0 +1,21 @@
+name: enterprise_app
+description: تطبيق موظفي المهيدب - حضور وانصراف وفحص باركود
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6
+  http: ^1.2.1
+  geolocator: ^12.0.0
+  local_auth: ^2.3.0
+  mobile_scanner: ^5.2.3
+  shared_preferences: ^2.2.3
+  permission_handler: ^11.3.1
+
+flutter:
+  uses-material-design: true
